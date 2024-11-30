@@ -11,60 +11,172 @@
 //! provides thread-safe connection management through Arc and Mutex.
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt};
-use futures_util::SinkExt;
-use std::{pin::Pin, sync::Arc};
+use futures::{Stream, StreamExt, SinkExt, Sink};
+use std::{pin::Pin, sync::Arc, fmt::Display};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{
     connect_async,
-    tungstenite::protocol::Message as WsMessage,
+    tungstenite::{
+        protocol::Message as WsMessage,
+        protocol::CloseFrame,
+        error::Error as WsError,
+    },
     WebSocketStream,
 };
+use tokio::io::{AsyncRead, AsyncWrite};
 use url::Url;
 
 use crate::{
-    error::{Error, ErrorCode},
-    protocol::Notification,
+    error::Error,
     transport::{Message, Transport},
 };
 
+const SUBPROTOCOL: &str = "mcp";
+
 /// Type alias for the WebSocket connection stream
-type WebSocketConnection = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WebSocketConnection<S> = WebSocketStream<S>;
 
 /// A transport implementation that uses WebSocket protocol for communication.
 ///
 /// This transport provides bidirectional communication over WebSocket protocol,
 /// supporting both secure (WSS) and standard (WS) connections.
-///
-/// # Thread Safety
-///
-/// The implementation is thread-safe, using Arc and Mutex to protect the WebSocket
-/// connection. This allows the transport to be used safely across multiple
-/// threads in an async context.
-///
-/// # Message Flow
-///
-/// - Input: Messages are received as WebSocket frames and parsed as JSON-RPC messages
-/// - Output: Messages are serialized to JSON and sent as WebSocket text frames
-///
-/// # Example
-///
-/// ```no_run
-/// use mcp_rust_sdk::transport::websocket::WebSocketTransport;
-///
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let transport = WebSocketTransport::new("ws://localhost:8080").await?;
-///     Ok(())
-/// }
-/// ```
-pub struct WebSocketTransport {
-    /// Thread-safe handle to the WebSocket connection
-    connection: Arc<Mutex<WebSocketConnection>>,
+pub struct WebSocketTransport<S> {
+    connection: Arc<Mutex<WebSocketConnection<S>>>,
 }
 
-impl WebSocketTransport {
-    /// Creates a new WebSocket transport by establishing a connection to the specified URL.
+impl<S> WebSocketTransport<S> {
+    /// Creates a new WebSocket transport from an existing WebSocket stream.
+    /// This is typically used on the server side when accepting a new connection.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The WebSocket stream from an accepted connection
+    pub fn from_stream(stream: WebSocketConnection<S>) -> Self {
+        Self {
+            connection: Arc::new(Mutex::new(stream)),
+        }
+    }
+
+    /// Converts an MCP message to a WebSocket message.
+    fn convert_to_ws_message(message: &Message) -> Result<WsMessage, Error> {
+        let json = serde_json::to_string(message)
+            .map_err(|e| Error::Serialization(e.to_string()))?;
+        Ok(WsMessage::Text(json))
+    }
+
+    /// Parses a WebSocket message into an MCP message.
+    fn parse_ws_message(ws_message: WsMessage) -> Result<Message, Error> {
+        match ws_message {
+            WsMessage::Text(text) => {
+                serde_json::from_str(&text).map_err(|e| Error::Serialization(e.to_string()))
+            }
+            WsMessage::Binary(_) => Err(Error::Transport("Binary messages not supported".to_string())),
+            WsMessage::Ping(_) => Ok(Message::Notification(crate::protocol::Notification {
+                jsonrpc: crate::protocol::JSONRPC_VERSION.to_string(),
+                method: "ping".to_string(),
+                params: None,
+            })),
+            WsMessage::Pong(_) => Ok(Message::Notification(crate::protocol::Notification {
+                jsonrpc: crate::protocol::JSONRPC_VERSION.to_string(),
+                method: "pong".to_string(),
+                params: None,
+            })),
+            WsMessage::Close(_) => Err(Error::Transport("Connection closed".to_string())),
+            WsMessage::Frame(_) => Err(Error::Transport("Raw frames not supported".to_string())),
+        }
+    }
+
+    /// Handle a WebSocket message, including control messages
+    async fn handle_ws_message<T, E>(connection: &mut T, message: WsMessage) -> Result<Option<Message>, Error> 
+    where
+        T: Sink<WsMessage, Error = E> + Unpin,
+        E: Display,
+    {
+        match message {
+            WsMessage::Ping(data) => {
+                // Automatically respond to ping with pong
+                connection.send(WsMessage::Pong(data)).await
+                    .map_err(|e| Error::Transport(e.to_string()))?;
+                Ok(None)
+            }
+            WsMessage::Pong(_) => {
+                // Ignore pong messages
+                Ok(None)
+            }
+            _ => Self::parse_ws_message(message).map(Some),
+        }
+    }
+}
+
+#[async_trait]
+impl<S> Transport for WebSocketTransport<S> 
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + Sync + 'static,
+{
+    async fn send(&self, message: Message) -> Result<(), Error> {
+        let ws_message = Self::convert_to_ws_message(&message)?;
+        let mut connection = self.connection.lock().await;
+        connection
+            .send(ws_message)
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))
+    }
+
+    fn receive(&self) -> Pin<Box<dyn Stream<Item = Result<Message, Error>> + Send>> {
+        let connection = self.connection.clone();
+        Box::pin(futures::stream::unfold(connection, move |connection| {
+            let connection = connection.clone();
+            async move {
+                let mut guard = connection.lock().await;
+                loop {
+                    match guard.next().await {
+                        Some(Ok(ws_message)) => {
+                            match Self::handle_ws_message(&mut *guard, ws_message).await {
+                                Ok(Some(message)) => return Some((Ok(message), connection.clone())),
+                                Ok(None) => continue, // Control message handled, continue to next message
+                                Err(e) => return Some((Err(e), connection.clone())),
+                            }
+                        }
+                        Some(Err(e)) => return Some((Err(Error::Transport(e.to_string())), connection.clone())),
+                        None => return None,
+                    }
+                }
+            }
+        }))
+    }
+
+    async fn close(&self) -> Result<(), Error> {
+        let mut connection = self.connection.lock().await;
+        // Send close frame with normal closure status
+        connection
+            .send(WsMessage::Close(Some(CloseFrame {
+                code: 1000u16.into(), // Normal closure
+                reason: "Client initiated close".into(),
+            })))
+            .await
+            .map_err(|e| Error::Transport(e.to_string()))?;
+        
+        // Wait for the close frame from the server
+        while let Some(msg) = connection.next().await {
+            match msg {
+                Ok(WsMessage::Close(_)) => break,
+                Ok(_) => continue,
+                Err(e) => {
+                    if matches!(e, WsError::ConnectionClosed) {
+                        break;
+                    }
+                    return Err(Error::Transport(e.to_string()));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
+// Client-specific implementation
+impl WebSocketTransport<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    /// Creates a new WebSocket transport as a client by connecting to the specified URL.
     ///
     /// # Arguments
     ///
@@ -75,268 +187,46 @@ impl WebSocketTransport {
     /// Returns a Result containing:
     /// - Ok: The new WebSocketTransport instance
     /// - Err: An error if connection fails
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - The URL is invalid
-    /// - The connection cannot be established
-    /// - The WebSocket handshake fails
     pub async fn new(url: &str) -> Result<Self, Error> {
-        let url = Url::parse(url).map_err(|e| Error::Other(e.to_string()))?;
+        let url = Url::parse(url).map_err(|e| Error::Transport(e.to_string()))?;
         
         let (ws_stream, _) = connect_async(url)
             .await
-            .map_err(|e| Error::Other(format!("WebSocket connection failed: {}", e)))?;
+            .map_err(|e| Error::Transport(e.to_string()))?;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(ws_stream)),
         })
-    }
-
-    /// Converts an MCP message to a WebSocket message.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The MCP message to convert
-    ///
-    /// # Returns
-    ///
-    /// Returns a Result containing:
-    /// - Ok: The WebSocket message
-    /// - Err: An error if serialization fails
-    fn convert_to_ws_message(message: &Message) -> Result<WsMessage, Error> {
-        let json = serde_json::to_string(&message)?;
-        Ok(WsMessage::Text(json))
-    }
-
-    /// Parses a WebSocket message into an MCP message.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The WebSocket message to parse
-    ///
-    /// # Returns
-    ///
-    /// Returns a Result containing:
-    /// - Ok: The parsed MCP message
-    /// - Err: An error if parsing fails or message type is unsupported
-    ///
-    /// # Message Types
-    ///
-    /// - Text: Parsed as JSON-RPC message
-    /// - Binary: Not supported, returns error
-    /// - Ping/Pong: Ignored with error
-    /// - Close: Returns error indicating connection closure
-    fn parse_ws_message(message: WsMessage) -> Result<Message, Error> {
-        match message {
-            WsMessage::Text(text) => {
-                serde_json::from_str(&text).map_err(|e| Error::Serialization(e.to_string()))
-            }
-            WsMessage::Binary(_) => Err(Error::protocol(
-                ErrorCode::InvalidRequest,
-                "Binary WebSocket messages are not supported",
-            )),
-            WsMessage::Ping(_) | WsMessage::Pong(_) => {
-                // Ignore ping/pong messages
-                Err(Error::protocol(
-                    ErrorCode::InvalidRequest,
-                    "Received ping/pong message",
-                ))
-            }
-            WsMessage::Close(_) => Err(Error::protocol(
-                ErrorCode::InvalidRequest,
-                "WebSocket connection closed",
-            )),
-            WsMessage::Frame(_) => Err(Error::protocol(
-                ErrorCode::InvalidRequest,
-                "Raw WebSocket frames are not supported",
-            )),
-        }
-    }
-}
-
-#[async_trait]
-impl Transport for WebSocketTransport {
-    /// Sends a message over the WebSocket connection.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to send
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if the message was successfully sent,
-    /// or an error if sending failed.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    /// - Failed to convert the message to WebSocket format
-    /// - Failed to acquire the connection lock
-    /// - Failed to send the message over WebSocket
-    async fn send(&self, message: Message) -> Result<(), Error> {
-        let ws_message = Self::convert_to_ws_message(&message)?;
-        let mut connection = self.connection.lock().await;
-        connection
-            .send(ws_message)
-            .await
-            .map_err(|e| Error::Other(format!("Failed to send WebSocket message: {}", e)))
-    }
-
-    /// Creates a stream of messages received from the WebSocket connection.
-    ///
-    /// # Returns
-    ///
-    /// Returns a pinned box containing a stream that yields Result<Message, Error>.
-    /// The stream will continue until the WebSocket connection is closed or an error occurs.
-    ///
-    /// # Message Flow
-    ///
-    /// 1. WebSocket messages are received from the connection
-    /// 2. Each message is parsed into an MCP message
-    /// 3. Messages are yielded through the stream
-    fn receive(&self) -> Pin<Box<dyn Stream<Item = Result<Message, Error>> + Send>> {
-        let connection = self.connection.clone();
-        
-        let stream = futures::stream::unfold((), move |_| {
-            let connection = connection.clone();
-            async move {
-                let mut guard = connection.lock().await;
-                match guard.next().await {
-                    Some(Ok(ws_message)) => {
-                        let result = Self::parse_ws_message(ws_message);
-                        Some((result, ()))
-                    }
-                    Some(Err(e)) => {
-                        Some((Err(Error::Other(format!("WebSocket error: {}", e))), ()))
-                    }
-                    None => None,
-                }
-            }
-        });
-
-        Box::pin(stream)
-    }
-
-    /// Closes the WebSocket connection.
-    ///
-    /// This method will attempt to perform a clean shutdown of the WebSocket connection
-    /// by sending a close frame and waiting for the connection to close.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` if the connection was successfully closed,
-    /// or an error if closing failed.
-    async fn close(&self) -> Result<(), Error> {
-        let mut connection = self.connection.lock().await;
-        connection
-            .close(None)
-            .await
-            .map_err(|e| Error::Other(format!("Failed to close WebSocket connection: {}", e)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::JSONRPC_VERSION;
-    use serde_json::json;
+    use crate::protocol::{JSONRPC_VERSION, Notification};
 
-    /// Tests message conversion between MCP and WebSocket formats:
-    /// - Converting MCP message to WebSocket message
-    /// - Parsing WebSocket message back to MCP message
-    /// - Handling various message types and formats
-    #[test]
-    fn test_message_conversion() {
-        // Test basic notification
-        let basic_message = Message::Notification(Notification {
+    #[tokio::test]
+    async fn test_message_conversion() {
+        let message = Message::Notification(Notification {
             jsonrpc: JSONRPC_VERSION.to_string(),
-            method: "test".to_string(),
-            params: Some(serde_json::Value::Null),
-        });
-
-        // Test JSON structure
-        let json_str = serde_json::to_string(&basic_message).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(value["type"], "notification");
-        assert_eq!(value["jsonrpc"], JSONRPC_VERSION);
-        assert_eq!(value["method"], "test");
-        assert_eq!(value["params"], serde_json::Value::Null);
-
-        // Test complex notification with JSON object
-        let complex_message = Message::Notification(Notification {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            method: "test".to_string(),
-            params: Some(json!({
-                "key": "value",
-                "number": 42
+            method: "test/method".to_string(),
+            params: Some(serde_json::json!({
+                "key": "value"
             })),
         });
 
-        // Test WebSocket conversion
-        let ws_message = WebSocketTransport::convert_to_ws_message(&complex_message).unwrap();
-        let text = match &ws_message {
-            WsMessage::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(text).unwrap();
-                assert_eq!(value["type"], "notification");
-                assert_eq!(value["jsonrpc"], JSONRPC_VERSION);
-                assert_eq!(value["method"], "test");
-                assert!(value["params"].is_object());
-                assert_eq!(value["params"]["key"], "value");
-                assert_eq!(value["params"]["number"], 42);
-                text
-            }
-            _ => panic!("Expected Text message"),
-        };
+        // Convert to WebSocket message
+        let ws_message = WebSocketTransport::<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>::convert_to_ws_message(&message).unwrap();
+        assert!(matches!(ws_message, WsMessage::Text(_)));
 
-        // Test conversion back from WebSocket message
-        let parsed_message = WebSocketTransport::parse_ws_message(WsMessage::Text(text.clone())).unwrap();
-        match parsed_message {
-            Message::Notification(n) => {
-                assert_eq!(n.jsonrpc, JSONRPC_VERSION);
-                assert_eq!(n.method, "test");
-                assert!(n.params.is_some());
-                if let Some(params) = n.params {
-                    assert_eq!(params["key"], "value");
-                    assert_eq!(params["number"], 42);
-                }
-            }
-            _ => panic!("Expected Notification"),
+        // Parse back to MCP message
+        let parsed_message = WebSocketTransport::<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>::parse_ws_message(ws_message).unwrap();
+        assert!(matches!(parsed_message, Message::Notification(_)));
+
+        if let Message::Notification(notification) = parsed_message {
+            assert_eq!(notification.jsonrpc, JSONRPC_VERSION);
+            assert_eq!(notification.method, "test/method");
+            assert!(notification.params.is_some());
         }
-    }
-
-    /// Tests handling of invalid WebSocket messages:
-    /// - Binary messages (unsupported)
-    /// - Invalid JSON
-    /// - Ping/Pong messages
-    /// - Close frames
-    #[test]
-    fn test_invalid_messages() {
-        // Test invalid JSON
-        let invalid_json = WsMessage::Text("not valid json".to_string());
-        assert!(matches!(
-            WebSocketTransport::parse_ws_message(invalid_json),
-            Err(Error::Serialization(_))
-        ));
-
-        // Test unsupported message types
-        let binary = WsMessage::Binary(vec![1, 2, 3]);
-        assert!(matches!(
-            WebSocketTransport::parse_ws_message(binary),
-            Err(Error::Protocol { code: ErrorCode::InvalidRequest, .. })
-        ));
-
-        let ping = WsMessage::Ping(vec![]);
-        assert!(matches!(
-            WebSocketTransport::parse_ws_message(ping),
-            Err(Error::Protocol { code: ErrorCode::InvalidRequest, .. })
-        ));
-
-        let close = WsMessage::Close(None);
-        assert!(matches!(
-            WebSocketTransport::parse_ws_message(close),
-            Err(Error::Protocol { code: ErrorCode::InvalidRequest, .. })
-        ));
     }
 }

@@ -1,8 +1,9 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use futures::StreamExt;
+use tokio::sync::{RwLock, Mutex};
 
 use crate::{
-    error::Error,
+    error::{Error, ErrorCode},
     protocol::{Notification, Request, RequestId},
     transport::{Message, Transport},
     types::{ClientCapabilities, Implementation, ServerCapabilities},
@@ -13,16 +14,40 @@ pub struct Client {
     transport: Arc<dyn Transport>,
     server_capabilities: Arc<RwLock<Option<ServerCapabilities>>>,
     request_counter: Arc<RwLock<i64>>,
+    response_receiver: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Message>>>,
+    response_sender: tokio::sync::mpsc::UnboundedSender<Message>,
 }
 
 impl Client {
     /// Create a new MCP client with the given transport
     pub fn new(transport: Arc<dyn Transport>) -> Self {
-        Self {
-            transport,
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = Self {
+            transport: transport.clone(),
             server_capabilities: Arc::new(RwLock::new(None)),
             request_counter: Arc::new(RwLock::new(0)),
-        }
+            response_receiver: Arc::new(Mutex::new(rx)),
+            response_sender: tx.clone(),
+        };
+
+        // Start response handler task
+        let transport_clone = transport.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let mut stream = transport_clone.receive();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(message) => {
+                        if tx_clone.send(message).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        client
     }
 
     /// Initialize the client
@@ -50,7 +75,10 @@ impl Client {
         Ok(server_capabilities)
     }
 
-    /// Send a request to the server
+    /// Send a request to the server and wait for the response.
+    /// 
+    /// This method will block until a response is received from the server.
+    /// If the server returns an error, it will be propagated as an `Error`.
     pub async fn request(
         &self,
         method: &str,
@@ -63,11 +91,38 @@ impl Client {
         let request = Request::new(method, params, id.clone());
         self.transport.send(Message::Request(request)).await?;
 
-        // TODO: Implement response handling
-        // This is a simplified version that doesn't actually wait for the response
+        // Wait for matching response
+        let mut receiver = self.response_receiver.lock().await;
+        while let Some(message) = receiver.recv().await {
+            if let Message::Response(response) = message {
+                if response.id == id {
+                    if let Some(error) = response.error {
+                        return Err(Error::protocol(
+                            match error.code {
+                                -32700 => ErrorCode::ParseError,
+                                -32600 => ErrorCode::InvalidRequest,
+                                -32601 => ErrorCode::MethodNotFound,
+                                -32602 => ErrorCode::InvalidParams,
+                                -32603 => ErrorCode::InternalError,
+                                -32002 => ErrorCode::ServerNotInitialized,
+                                -32001 => ErrorCode::UnknownErrorCode,
+                                -32000 => ErrorCode::RequestFailed,
+                                _ => ErrorCode::UnknownErrorCode,
+                            },
+                            &error.message,
+                        ));
+                    }
+                    return response.result.ok_or_else(|| Error::protocol(
+                        ErrorCode::InternalError,
+                        "Response missing result",
+                    ));
+                }
+            }
+        }
+
         Err(Error::protocol(
-            crate::error::ErrorCode::InternalError,
-            "Response handling not implemented",
+            ErrorCode::InternalError,
+            "Connection closed while waiting for response",
         ))
     }
 

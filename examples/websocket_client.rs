@@ -8,7 +8,7 @@ use mcp_rust_sdk::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create WebSocket transport
-    let transport = WebSocketTransport::new("ws://127.0.0.1:8080").await?;
+    let transport = WebSocketTransport::new("ws://127.0.0.1:8780").await?;
     
     // Create MCP client
     let client = Client::new(Arc::new(transport));
