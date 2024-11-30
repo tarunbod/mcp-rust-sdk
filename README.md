@@ -2,9 +2,9 @@
 
 A Rust implementation of the Model Context Protocol (MCP), designed for seamless communication between AI models and their runtime environments.
 
-[![Rust CI/CD](https://github.com/codeium/ModelContextMachine/actions/workflows/rust.yml/badge.svg)](https://github.com/codeium/ModelContextMachine/actions/workflows/rust.yml)
-[![crates.io](https://img.shields.io/crates/v/mcp-rust-sdk.svg)](https://crates.io/crates/mcp-rust-sdk)
-[![Documentation](https://docs.rs/mcp-rust-sdk/badge.svg)](https://docs.rs/mcp-rust-sdk)
+[![Rust CI/CD](https://github.com/Derek-X-Wang/mcp_rust_sdk/actions/workflows/rust.yml/badge.svg)](https://github.com/Derek-X-Wang/mcp_rust_sdk/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/mcp_rust_sdk.svg)](https://crates.io/crates/mcp_rust_sdk)
+[![Documentation](https://docs.rs/mcp_rust_sdk/badge.svg)](https://docs.rs/mcp_rust_sdk)
 
 ## Features
 
@@ -21,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mcp-rust-sdk = "0.1.0"
+mcp_rust_sdk = "0.1.0"
 ```
 
 ## Quick Start

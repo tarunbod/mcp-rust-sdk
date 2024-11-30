@@ -1,11 +1,11 @@
 [package]
-name = "mcp-rust-sdk"
+name = "mcp_rust_sdk"
 version = "0.1.0"
 edition = "2021"
 description = "Rust SDK for the Model Context Protocol (MCP)"
 license = "MIT"
-repository = "https://github.com/codeium/ModelContextMachine"
-documentation = "https://github.com/codeium/ModelContextMachine/tree/main/mcp-rust-sdk"
+repository = "https://github.com/Derek-X-Wang/mcp_rust_sdk"
+documentation = "https://github.com/Derek-X-Wang/mcp_rust_sdk"
 keywords = ["mcp", "sdk", "protocol", "machine-learning", "ai"]
 
 [dependencies]
