@@ -14,17 +14,20 @@
 //!
 //! ## Example
 //!
-//! ```rust
-//! use mcp_rust_sdk::{Client, transport::WebSocketTransport};
-//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use mcp_rust_sdk::client::Client;
+//! use mcp_rust_sdk::transport::websocket::WebSocketTransport;
+//! 
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create a WebSocket transport
 //!     let transport = WebSocketTransport::new("ws://localhost:8080").await?;
 //!     
-//!     // Create and connect the client
-//!     let client = Client::new(transport);
-//!     client.connect().await?;
+//!     // Create the client with Arc-wrapped transport
+//!     let client = Client::new(Arc::new(transport));
+//!     
+//!     // Use the client...
 //!     
 //!     Ok(())
 //! }

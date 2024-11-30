@@ -99,25 +99,127 @@ impl Client {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::transport::stdio::StdioTransport;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{pin::Pin, time::Duration};
+    use tokio::sync::broadcast;
+    use futures::Stream;
+    use async_trait::async_trait;
 
-//     #[tokio::test]
-//     async fn test_client_initialization() {
-//         let (transport, _sender) = StdioTransport::new();
-//         let client = Client::new(Arc::new(transport));
+    struct MockTransport {
+        tx: broadcast::Sender<Result<Message, Error>>,
+        send_delay: Duration,
+    }
 
-//         let implementation = Implementation {
-//             name: "test-client".to_string(),
-//             version: "0.1.0".to_string(),
-//         };
+    impl MockTransport {
+        fn new(send_delay: Duration) -> (Self, broadcast::Sender<Result<Message, Error>>) {
+            let (tx, _) = broadcast::channel(10);
+            let tx_clone = tx.clone();
+            (Self {
+                tx,
+                send_delay,
+            }, tx_clone)
+        }
+    }
 
-//         let capabilities = ClientCapabilities::default();
+    #[async_trait]
+    impl Transport for MockTransport {
+        async fn send(&self, message: Message) -> Result<(), Error> {
+            tokio::time::sleep(self.send_delay).await;
+            self.tx.send(Ok(message)).map(|_| ()).map_err(|_| {
+                Error::protocol(
+                    crate::error::ErrorCode::InternalError,
+                    "Failed to send message",
+                )
+            })
+        }
 
-//         // This will fail because we haven't implemented response handling
-//         let result = client.initialize(implementation, capabilities).await;
-//         assert!(result.is_err());
-//     }
-// }
+        fn receive(&self) -> Pin<Box<dyn Stream<Item = Result<Message, Error>> + Send>> {
+            let mut rx = self.tx.subscribe();
+            Box::pin(async_stream::stream! {
+                while let Ok(msg) = rx.recv().await {
+                    yield msg;
+                }
+            })
+        }
+
+        async fn close(&self) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_client_initialization_timeout() {
+        // Create a mock transport with 6 second delay (longer than our timeout)
+        let (transport, _tx) = MockTransport::new(Duration::from_secs(6));
+        let client = Client::new(Arc::new(transport));
+
+        // Try to initialize with 5 second timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.initialize(
+                Implementation {
+                    name: "test".to_string(),
+                    version: "1.0".to_string(),
+                },
+                ClientCapabilities::default(),
+            ),
+        )
+        .await;
+
+        // Should timeout
+        assert!(result.is_err(), "Expected timeout error");
+    }
+
+    #[tokio::test]
+    async fn test_client_request_timeout() {
+        // Create a mock transport with 6 second delay
+        let (transport, _tx) = MockTransport::new(Duration::from_secs(6));
+        let client = Client::new(Arc::new(transport));
+
+        // Try to send request with 5 second timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.request("test", Some(serde_json::json!({"key": "value"}))),
+        )
+        .await;
+
+        // Should timeout
+        assert!(result.is_err(), "Expected timeout error");
+    }
+
+    #[tokio::test]
+    async fn test_client_notification_timeout() {
+        // Create a mock transport with 6 second delay
+        let (transport, _tx) = MockTransport::new(Duration::from_secs(6));
+        let client = Client::new(Arc::new(transport));
+
+        // Try to send notification with 5 second timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.notify("test", Some(serde_json::json!({"key": "value"}))),
+        )
+        .await;
+
+        // Should timeout
+        assert!(result.is_err(), "Expected timeout error");
+    }
+
+    #[tokio::test]
+    async fn test_client_fast_operation() {
+        // Create a mock transport with 1 second delay (shorter than timeout)
+        let (transport, _tx) = MockTransport::new(Duration::from_secs(1));
+        let client = Client::new(Arc::new(transport));
+
+        // Try to send notification with 5 second timeout
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.notify("test", Some(serde_json::json!({"key": "value"}))),
+        )
+        .await;
+
+        // Should complete before timeout
+        assert!(result.is_ok(), "Operation should complete before timeout");
+    }
+}

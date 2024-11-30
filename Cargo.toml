@@ -27,6 +27,7 @@ base64 = "0.21"
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1.4"
+async-stream = "0.3"
 
 [[example]]
 name = "websocket_client"

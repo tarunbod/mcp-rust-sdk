@@ -139,3 +139,77 @@ impl fmt::Display for RequestId {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_request_creation() {
+        let id = RequestId::Number(1);
+        let params = Some(json!({"key": "value"}));
+        let request = Request::new("test_method", params.clone(), id.clone());
+        
+        assert_eq!(request.jsonrpc, JSONRPC_VERSION);
+        assert_eq!(request.method, "test_method");
+        assert_eq!(request.params, params);
+        assert_eq!(request.id, id);
+    }
+
+    #[test]
+    fn test_notification_creation() {
+        let params = Some(json!({"event": "update"}));
+        let notification = Notification::new("test_event", params.clone());
+        
+        assert_eq!(notification.jsonrpc, JSONRPC_VERSION);
+        assert_eq!(notification.method, "test_event");
+        assert_eq!(notification.params, params);
+    }
+
+    #[test]
+    fn test_response_success() {
+        let id = RequestId::String("test-1".to_string());
+        let result = Some(json!({"status": "ok"}));
+        let response = Response::success(id.clone(), result.clone());
+        
+        assert_eq!(response.jsonrpc, JSONRPC_VERSION);
+        assert_eq!(response.id, id);
+        assert_eq!(response.result, result);
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn test_response_error() {
+        let id = RequestId::Number(123);
+        let error = ResponseError {
+            code: -32600,
+            message: "Invalid Request".to_string(),
+            data: Some(json!({"details": "missing method"})),
+        };
+        let response = Response::error(id.clone(), error.clone());
+        
+        assert_eq!(response.jsonrpc, JSONRPC_VERSION);
+        assert_eq!(response.id, id);
+        assert!(response.result.is_none());
+        
+        let response_error = response.error.unwrap();
+        assert_eq!(response_error.code, error.code);
+        assert_eq!(response_error.message, error.message);
+    }
+
+    #[test]
+    fn test_request_id_display() {
+        let num_id = RequestId::Number(42);
+        let str_id = RequestId::String("test-id".to_string());
+        
+        assert_eq!(num_id.to_string(), "42");
+        assert_eq!(str_id.to_string(), "test-id");
+    }
+
+    #[test]
+    fn test_protocol_versions() {
+        assert!(SUPPORTED_PROTOCOL_VERSIONS.contains(&LATEST_PROTOCOL_VERSION));
+        assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+}

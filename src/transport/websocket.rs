@@ -49,13 +49,12 @@ type WebSocketConnection = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tok
 ///
 /// # Example
 ///
-/// ```rust
-/// use mcp_rust_sdk::transport::WebSocketTransport;
+/// ```no_run
+/// use mcp_rust_sdk::transport::websocket::WebSocketTransport;
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let transport = WebSocketTransport::new("ws://localhost:8080").await?;
-///     // Use transport with a client or server...
 ///     Ok(())
 /// }
 /// ```
