@@ -1,8 +1,10 @@
 # Model Context Protocol (MCP) Rust SDK
 
+> ⚠️ **Warning**: This SDK is currently a work in progress and is not ready for production use.
+
 A Rust implementation of the Model Context Protocol (MCP), designed for seamless communication between AI models and their runtime environments.
 
-[![Rust CI/CD](https://github.com/Derek-X-Wang/mcp_rust_sdk/actions/workflows/rust.yml/badge.svg)](https://github.com/Derek-X-Wang/mcp_rust_sdk/actions/workflows/rust.yml)
+[![Rust CI/CD](https://github.com/Derek-X-Wang/mcp-rust-sdk/actions/workflows/rust.yml/badge.svg)](https://github.com/Derek-X-Wang/mcp-rust-sdk/actions/workflows/rust.yml)
 [![crates.io](https://img.shields.io/crates/v/mcp_rust_sdk.svg)](https://crates.io/crates/mcp_rust_sdk)
 [![Documentation](https://docs.rs/mcp_rust_sdk/badge.svg)](https://docs.rs/mcp_rust_sdk)
 
