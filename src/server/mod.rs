@@ -422,4 +422,205 @@ mod tests {
         let _ = client_tx.send(Ok(Message::Notification(Notification::new("exit", None))));
         let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
     }
+
+    #[tokio::test]
+    async fn test_double_initialization() {
+        // Create transport and server
+        let (transport, client_tx, mut client_rx) = MockTransport::new();
+        let handler = TestHandler::new(
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
+        let server = Server::new(Arc::new(transport), Arc::new(handler));
+
+        // Start server in background
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                eprintln!("Server error: {}", e);
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send first initialize request
+        let init_request = Request::new(
+            "initialize",
+            Some(serde_json::json!({
+                "implementation": {
+                    "name": "test-client",
+                    "version": "0.1.0"
+                },
+                "capabilities": {},
+                "protocolVersion": "2024-11-05"
+            })),
+            RequestId::Number(1),
+        );
+
+        let _ = client_tx.send(Ok(Message::Request(init_request.clone())));
+
+        // Wait for first response
+        let _ = client_rx.recv().await;
+
+        // Send initialized notification
+        let _ = client_tx.send(Ok(Message::Notification(Notification::new("initialized", None))));
+
+        // Give server time to process notification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send second initialize request
+        let init_request2 = Request::new(
+            "initialize",
+            Some(serde_json::json!({
+                "implementation": {
+                    "name": "test-client",
+                    "version": "0.1.0"
+                },
+                "capabilities": {},
+                "protocolVersion": "2024-11-05"
+            })),
+            RequestId::Number(2),
+        );
+
+        let _ = client_tx.send(Ok(Message::Request(init_request2)));
+
+        // Try to receive response
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_rx.recv(),
+        )
+        .await;
+
+        // Should receive error response
+        assert!(result.is_ok(), "Should receive response");
+        if let Ok(Ok(Ok(Message::Response(response)))) = result {
+            assert!(response.error.is_some(), "Response should contain error");
+            assert_eq!(
+                response.error.as_ref().unwrap().code,
+                ErrorCode::InvalidRequest as i32,
+                "Should receive invalid request error"
+            );
+        } else {
+            panic!("Expected error response");
+        }
+
+        // Cleanup
+        let _ = client_tx.send(Ok(Message::Notification(Notification::new("exit", None))));
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_handling() {
+        // Create transport and server
+        let (transport, client_tx, mut client_rx) = MockTransport::new();
+        let handler = TestHandler::new(
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
+        let server = Server::new(Arc::new(transport), Arc::new(handler));
+
+        // Start server in background
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                eprintln!("Server error: {}", e);
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send initialize request
+        let init_request = Request::new(
+            "initialize",
+            Some(serde_json::json!({
+                "implementation": {
+                    "name": "test-client",
+                    "version": "0.1.0"
+                },
+                "capabilities": {},
+                "protocolVersion": "2024-11-05"
+            })),
+            RequestId::Number(1),
+        );
+
+        let _ = client_tx.send(Ok(Message::Request(init_request)));
+
+        // Wait for response
+        let _ = client_rx.recv().await;
+
+        // Send initialized notification
+        let _ = client_tx.send(Ok(Message::Notification(Notification::new("initialized", None))));
+
+        // Give server time to process notification
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send shutdown request
+        let shutdown_request = Request::new(
+            "shutdown",
+            None,
+            RequestId::Number(2),
+        );
+
+        let _ = client_tx.send(Ok(Message::Request(shutdown_request)));
+
+        // Try to receive response
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_rx.recv(),
+        )
+        .await;
+
+        // Should receive success response
+        assert!(result.is_ok(), "Should receive response");
+        if let Ok(Ok(Ok(Message::Response(response)))) = result {
+            assert!(response.error.is_none(), "Response should not contain error");
+            assert!(response.result.is_none(), "Response should not contain result");
+        } else {
+            panic!("Expected success response");
+        }
+
+        // Send exit notification
+        let _ = client_tx.send(Ok(Message::Notification(Notification::new("exit", None))));
+
+        // Server should exit
+        let _ = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_invalid_message_handling() {
+        // Create transport and server
+        let (transport, client_tx, mut client_rx) = MockTransport::new();
+        let handler = TestHandler::new(
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        );
+        let server = Server::new(Arc::new(transport), Arc::new(handler));
+
+        // Start server in background
+        let server_handle = tokio::spawn(async move {
+            if let Err(e) = server.start().await {
+                eprintln!("Server error: {}", e);
+            }
+        });
+
+        // Give server time to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Send a response message (which server should not receive)
+        let response = Response::success(RequestId::Number(1), None);
+        let _ = client_tx.send(Ok(Message::Response(response)));
+
+        // Give server time to process
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Server should have exited with error
+        let result = tokio::time::timeout(Duration::from_secs(1), server_handle).await;
+        assert!(result.is_ok(), "Server should exit");
+
+        // Cleanup
+        let _ = client_tx.send(Ok(Message::Notification(Notification::new("exit", None))));
+    }
 }
