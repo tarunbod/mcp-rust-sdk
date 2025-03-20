@@ -84,7 +84,7 @@ pub struct Completion {
 
 /// Client implementation information
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Implementation {
+pub struct ClientInfo {
     /// Name of the implementation
     pub name: String,
     /// Version of the implementation
@@ -175,7 +175,7 @@ pub struct Root {
 /// Initialize request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeRequest {
-    pub client_info: Implementation,
+    pub client_info: ClientInfo,
     pub capabilities: ClientCapabilities,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol_version: Option<String>,
@@ -184,7 +184,7 @@ pub struct InitializeRequest {
 /// Initialize result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeResult {
-    pub server_info: Implementation,
+    pub server_info: ClientInfo,
     pub capabilities: ServerCapabilities,
 }
 

@@ -7,7 +7,7 @@ use crate::{
     error::{Error, ErrorCode},
     protocol::{Request, Response, Notification, ResponseError, RequestId},
     transport::{Message, Transport},
-    types::{ClientCapabilities, Implementation, ServerCapabilities},
+    types::{ClientCapabilities, ClientInfo, ServerCapabilities},
 };
 
 /// Trait for implementing MCP server handlers
@@ -16,7 +16,7 @@ pub trait ServerHandler: Send + Sync {
     /// Handle initialization
     async fn initialize(
         &self,
-        implementation: Implementation,
+        implementation: ClientInfo,
         capabilities: ClientCapabilities,
     ) -> Result<ServerCapabilities, Error>;
 
@@ -98,7 +98,7 @@ impl Server {
                 }
 
                 let params: serde_json::Value = request.params.unwrap_or(serde_json::json!({}));
-                let implementation: Implementation =
+                let implementation: ClientInfo =
                     serde_json::from_value(params.get("implementation").cloned().unwrap_or_default())?;
                 let capabilities: ClientCapabilities =
                     serde_json::from_value(params.get("capabilities").cloned().unwrap_or_default())?;
@@ -160,7 +160,7 @@ mod tests {
     impl ServerHandler for TestHandler {
         async fn initialize(
             &self,
-            _implementation: Implementation,
+            _implementation: ClientInfo,
             _capabilities: ClientCapabilities,
         ) -> Result<ServerCapabilities, Error> {
             tokio::time::sleep(self.init_delay).await;

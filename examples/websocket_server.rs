@@ -8,7 +8,7 @@ use mcp_rust_sdk::{
     error::Error,
     server::{Server, ServerHandler},
     transport::websocket::WebSocketTransport,
-    types::{ClientCapabilities, Implementation, ServerCapabilities},
+    types::{ClientCapabilities, ClientInfo, ServerCapabilities},
 };
 
 /// Example server handler that implements basic MCP server functionality
@@ -18,7 +18,7 @@ struct ExampleHandler;
 impl ServerHandler for ExampleHandler {
     async fn initialize(
         &self,
-        implementation: Implementation,
+        implementation: ClientInfo,
         _capabilities: ClientCapabilities,
     ) -> Result<ServerCapabilities, Error> {
         println!("Client connected: {} v{}", implementation.name, implementation.version);
@@ -63,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Create WebSocket transport from the accepted stream
         let transport = WebSocketTransport::from_stream(ws_stream);
-        
+
         // Create MCP server with the transport and handler
         let server = Server::new(Arc::new(transport), Arc::new(ExampleHandler));
 

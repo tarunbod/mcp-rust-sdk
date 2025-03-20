@@ -2,19 +2,19 @@ use std::sync::Arc;
 use mcp_rust_sdk::{
     client::Client,
     transport::websocket::WebSocketTransport,
-    types::{ClientCapabilities, Implementation},
+    types::{ClientCapabilities, ClientInfo},
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create WebSocket transport
     let transport = WebSocketTransport::new("ws://127.0.0.1:8780").await?;
-    
+
     // Create MCP client
     let client = Client::new(Arc::new(transport));
 
     // Initialize client
-    let implementation = Implementation {
+    let implementation = ClientInfo {
         name: "example-client".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     };

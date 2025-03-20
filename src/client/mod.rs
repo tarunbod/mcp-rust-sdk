@@ -6,16 +6,16 @@ use crate::{
     error::{Error, ErrorCode},
     protocol::{Notification, Request, RequestId},
     transport::{Message, Transport},
-    types::{ClientCapabilities, Implementation, ServerCapabilities},
+    types::{ClientCapabilities, ClientInfo, ServerCapabilities},
 };
 
 /// MCP client state
+#[derive(Clone)]
 pub struct Client {
     transport: Arc<dyn Transport>,
     server_capabilities: Arc<RwLock<Option<ServerCapabilities>>>,
     request_counter: Arc<RwLock<i64>>,
     response_receiver: Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Message>>>,
-    response_sender: tokio::sync::mpsc::UnboundedSender<Message>,
 }
 
 impl Client {
@@ -27,7 +27,6 @@ impl Client {
             server_capabilities: Arc::new(RwLock::new(None)),
             request_counter: Arc::new(RwLock::new(0)),
             response_receiver: Arc::new(Mutex::new(rx)),
-            response_sender: tx.clone(),
         };
 
         // Start response handler task
@@ -53,11 +52,11 @@ impl Client {
     /// Initialize the client
     pub async fn initialize(
         &self,
-        implementation: Implementation,
+        client_info: ClientInfo,
         capabilities: ClientCapabilities,
     ) -> Result<ServerCapabilities, Error> {
         let params = serde_json::json!({
-            "implementation": implementation,
+            "clientInfo": client_info,
             "capabilities": capabilities,
             "protocolVersion": crate::LATEST_PROTOCOL_VERSION,
         });
@@ -76,7 +75,7 @@ impl Client {
     }
 
     /// Send a request to the server and wait for the response.
-    /// 
+    ///
     /// This method will block until a response is received from the server.
     /// If the server returns an error, it will be propagated as an `Error`.
     pub async fn request(
@@ -214,7 +213,7 @@ mod tests {
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             client.initialize(
-                Implementation {
+                ClientInfo {
                     name: "test".to_string(),
                     version: "1.0".to_string(),
                 },
